@@ -43,6 +43,7 @@ import asyncio
 import inspect
 import json
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, field, replace
 from types import UnionType
@@ -754,6 +755,7 @@ class ToolNode(RunnableCallable):
         messages_key: str = "messages",
         wrap_tool_call: ToolCallWrapper | None = None,
         awrap_tool_call: AsyncToolCallWrapper | None = None,
+        timeout: float | None = None,
     ) -> None:
         """Initialize `ToolNode` with tools and configuration.
 
@@ -768,6 +770,10 @@ class ToolNode(RunnableCallable):
                 Enables retries, caching, request modification, and control flow.
             awrap_tool_call: Async wrapper function to intercept tool execution.
                 If not provided, falls back to wrap_tool_call for async execution.
+            timeout: Maximum number of seconds to wait for a single tool invocation.
+                When exceeded, raises `asyncio.TimeoutError` (async) or
+                `TimeoutError` (sync), which is handled like any other tool error
+                according to `handle_tool_errors`. Defaults to `None` (no timeout).
         """
         super().__init__(self._func, self._afunc, name=name, tags=tags, trace=False)
         self._tools_by_name: dict[str, BaseTool] = {}
@@ -776,6 +782,7 @@ class ToolNode(RunnableCallable):
         self._messages_key = messages_key
         self._wrap_tool_call = wrap_tool_call
         self._awrap_tool_call = awrap_tool_call
+        self._timeout = timeout
         for tool in tools:
             if not isinstance(tool, BaseTool):
                 tool_ = create_tool(cast("type[BaseTool]", tool))
@@ -955,7 +962,8 @@ class ToolNode(RunnableCallable):
 
         try:
             try:
-                response = tool.invoke(call_args, config)
+                with nullcontext():
+                    response = tool.invoke(call_args, config)
             except ValidationError as exc:
                 # Filter out errors for injected arguments
                 injected = self._injected_args.get(call["name"])
@@ -1102,7 +1110,12 @@ class ToolNode(RunnableCallable):
 
         try:
             try:
-                response = await tool.ainvoke(call_args, config)
+                async with (
+                    asyncio.timeout(self._timeout)
+                    if self._timeout is not None
+                    else nullcontext()
+                ):
+                    response = await tool.ainvoke(call_args, config)
             except ValidationError as exc:
                 # Filter out errors for injected arguments
                 injected = self._injected_args.get(call["name"])
